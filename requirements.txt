@@ -1,7 +1,10 @@
+streamlit
 torch
 transformers
+accelerate
 sentencepiece
 peft
-datasets
-faiss-cpu
 sentence-transformers
+faiss-cpu
+numpy
+pypdf

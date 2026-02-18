@@ -1,8 +1,10 @@
-"""
+﻿"""
 Simple FAISS retriever for AgriSathi.
 
-This module is intentionally small and beginner-friendly so app code can call:
-    from rag.retrieve import retrieve_top_k
+Returns top-k relevant chunks with:
+- title
+- source_path
+- score
 """
 
 from __future__ import annotations
@@ -16,46 +18,61 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 
+DEFAULT_INDEX_PATH = "rag/rag_index.faiss"
+DEFAULT_CHUNKS_PATH = "rag/rag_chunks.jsonl"
+DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def load_chunks_jsonl(path: Path) -> List[Dict]:
+    chunks: List[Dict] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            chunks.append(json.loads(line))
+    return chunks
+
+
 def retrieve_top_k(
     query: str,
     top_k: int = 3,
-    index_path: str = "rag_index.faiss",
-    meta_path: str = "rag_index_meta.json",
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    index_path: str = DEFAULT_INDEX_PATH,
+    meta_path: str = DEFAULT_CHUNKS_PATH,
+    embedding_model: str = DEFAULT_EMBED_MODEL,
 ) -> List[Dict]:
     """
-    Retrieve top-k chunks for a query from FAISS index + metadata JSON.
-    Returns list of dicts with keys: title, text, source_path, score
+    Retrieve top-k chunks for a query.
+    Returns list of dicts including title, source_path, text, score.
     """
     idx_path = Path(index_path)
-    md_path = Path(meta_path)
-    if not idx_path.exists() or not md_path.exists():
+    chunks_path = Path(meta_path)
+
+    if not idx_path.exists() or not chunks_path.exists():
         return []
 
     index = faiss.read_index(str(idx_path))
-    with md_path.open("r", encoding="utf-8") as f:
-        meta = json.load(f)
-
-    if not meta:
+    chunks = load_chunks_jsonl(chunks_path)
+    if not chunks:
         return []
 
     embedder = SentenceTransformer(embedding_model)
     qvec = embedder.encode([query], convert_to_numpy=True, normalize_embeddings=True).astype(np.float32)
 
-    k = min(max(1, int(top_k)), len(meta))
+    k = min(max(1, int(top_k)), len(chunks))
     scores, indices = index.search(qvec, k)
 
-    out: List[Dict] = []
-    for score, i in zip(scores[0], indices[0]):
-        if i < 0:
+    results: List[Dict] = []
+    for score, idx in zip(scores[0], indices[0]):
+        if idx < 0:
             continue
-        item = meta[i]
-        out.append(
+        row = chunks[idx]
+        results.append(
             {
-                "title": item.get("title", f"chunk-{i}"),
-                "text": item.get("text", ""),
-                "source_path": item.get("source_path", ""),
+                "title": row.get("title", f"chunk-{idx}"),
+                "source_path": row.get("source_path", ""),
+                "text": row.get("text", ""),
                 "score": float(score),
             }
         )
-    return out
+    return results

@@ -1,39 +1,26 @@
 """
-AgriSathi mini product demo (single file).
+AgriSathi Mini MVP - Streamlit app (Hugging Face Spaces compatible).
 
-Modes:
-1) Streamlit UI (default if Streamlit is installed and --cli is not used)
-2) CLI fallback (if Streamlit is missing OR --cli flag is provided)
-
-Run:
-- python app.py
-- python app.py --cli
+Notes for Spaces:
+- Streamlit SDK runs this file directly.
+- No subprocess auto-launch logic is used.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
-import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
+import streamlit as st
+import streamlit.components.v1 as components
 import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 from rag.retrieve import retrieve_top_k
-
-try:
-    import streamlit as st
-
-    STREAMLIT_AVAILABLE = True
-except Exception:
-    st = None  # type: ignore
-    STREAMLIT_AVAILABLE = False
 
 
 SYSTEM_PROMPT = (
@@ -54,46 +41,13 @@ SYSTEM_PROMPT = (
 
 DEFAULT_MODEL = os.getenv("MODEL_NAME", "distilgpt2")
 LOG_PATH = Path("data/product_logs.jsonl")
+RAG_INDEX_PATH = Path("rag/rag_index.faiss")
+RAG_CHUNKS_PATH = Path("rag/rag_chunks.jsonl")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="AgriSathi demo app")
-    parser.add_argument("--cli", action="store_true", help="Force CLI mode.")
-    parser.add_argument("--model_name", type=str, default=DEFAULT_MODEL)
-    parser.add_argument("--adapter_path", type=str, default="")
-    parser.add_argument("--rag", action="store_true", help="Enable RAG in CLI mode.")
-    parser.add_argument("--top_k", type=int, default=3)
-    parser.add_argument("--crop", type=str, default="tomato")
-    parser.add_argument("--stage", type=str, default="vegetative")
-    parser.add_argument("--location", type=str, default="")
-    parser.add_argument("--symptoms", type=str, default="")
-    return parser.parse_args()
-
-
-def _is_running_inside_streamlit() -> bool:
-    if not STREAMLIT_AVAILABLE:
-        return False
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-
-        return get_script_run_ctx() is not None
-    except Exception:
-        return False
-
-
-def _auto_launch_streamlit_if_needed() -> None:
-    """
-    Supports `python app.py` startup:
-    if script is not already in Streamlit runtime, launch streamlit run.
-    """
-    if _is_running_inside_streamlit():
-        return
-    cmd = [sys.executable, "-m", "streamlit", "run", __file__]
-    raise SystemExit(subprocess.call(cmd))
-
-
+@st.cache_resource(show_spinner=False)
 def load_generator(model_name: str, adapter_path: str = ""):
-    """Load tokenizer + base model + optional adapter, then build generation pipeline."""
+    """Load tokenizer + base model + optional LoRA adapter."""
     use_gpu = torch.cuda.is_available()
     device = 0 if use_gpu else -1
 
@@ -167,77 +121,51 @@ def append_log(record: Dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def run_cli(args: argparse.Namespace) -> None:
-    """
-    CLI fallback mode.
-    Toggles use defaults: RAG off unless --rag is passed; top_k default 3.
-    """
-    print("AgriSathi CLI mode")
-    print("Type 'exit' to quit.")
-    print("Safety: always check product labels and consult local agronomist.\n")
-
-    gen = load_generator(model_name=args.model_name, adapter_path=args.adapter_path)
-    context = build_context_json(
-        crop=args.crop,
-        stage=args.stage,
-        location=args.location,
-        symptoms=args.symptoms,
+def render_copy_answer_button(answer: str) -> None:
+    """Copy-to-clipboard button using browser navigator API."""
+    safe_answer_js = json.dumps(answer)
+    components.html(
+        f"""
+        <div>
+          <button id="copyAnswerBtn" style="padding:8px 12px; border-radius:8px; border:1px solid #ccc; cursor:pointer;">
+            Copy answer
+          </button>
+          <span id="copyStatus" style="margin-left:10px; font-size:13px;"></span>
+        </div>
+        <script>
+          const btn = document.getElementById("copyAnswerBtn");
+          const status = document.getElementById("copyStatus");
+          btn.onclick = async () => {{
+            try {{
+              await navigator.clipboard.writeText({safe_answer_js});
+              status.textContent = "Copied to clipboard.";
+              status.style.color = "green";
+            }} catch (e) {{
+              status.textContent = "Copy failed.";
+              status.style.color = "red";
+            }}
+          }};
+        </script>
+        """,
+        height=55,
     )
 
-    while True:
-        question = input("You: ").strip()
-        if question.lower() in {"exit", "quit"}:
-            print("AgriSathi: Goodbye!")
-            break
-        if not question:
-            print("AgriSathi: Please enter a question.")
-            continue
 
-        rag_chunks: List[Dict] = []
-        if args.rag:
-            rag_chunks = retrieve_top_k(
-                query=question,
-                top_k=max(1, min(6, int(args.top_k))),
-                index_path="rag_index.faiss",
-                meta_path="rag_index_meta.json",
-            )
-
-        prompt = build_prompt(question, context=context, rag_chunks=rag_chunks)
-        answer = generate_answer(gen, prompt)
-
-        print("\n" + answer + "\n")
-        if rag_chunks:
-            print("Sources used:")
-            for i, ch in enumerate(rag_chunks, start=1):
-                print(f"{i}. {ch.get('title', 'untitled')} ({ch.get('source_path', '')})")
-            print("")
-
-        log_record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "mode": "cli",
-            "model_name": args.model_name,
-            "adapter_path": args.adapter_path,
-            "question": question,
-            "context": context,
-            "rag_enabled": bool(args.rag),
-            "top_k": int(args.top_k),
-            "sources": [c.get("title", "") for c in rag_chunks],
-            "prompt_used": prompt,
-            "answer": answer,
-        }
-        append_log(log_record)
+def rag_assets_ready() -> bool:
+    return RAG_INDEX_PATH.exists() and RAG_CHUNKS_PATH.exists()
 
 
-def run_streamlit_ui() -> None:
-    """Streamlit UI mode."""
-    assert st is not None  # for type checkers
-
+def main() -> None:
     st.set_page_config(page_title="AgriSathi Demo", page_icon=":seedling:", layout="wide")
     st.title("AgriSathi - Mini Product Demo")
     st.warning(
         "Safety first: AgriSathi gives informational guidance only. "
         "For chemical use, always check product labels and consult a local agronomist."
     )
+    if rag_assets_ready():
+        st.caption("RAG index: FOUND ✅")
+    else:
+        st.caption("RAG index: MISSING ❌")
 
     with st.sidebar:
         st.header("Settings")
@@ -260,12 +188,19 @@ def run_streamlit_ui() -> None:
         model_name = st.text_input("Base model", value=DEFAULT_MODEL)
 
     st.subheader("Ask AgriSathi")
-    user_question = st.text_area("Question", placeholder="Ask your farming question...")
+    english_question = st.text_area("Question (English)", placeholder="Ask your farming question...")
+    marathi_question = st.text_area("Question (Marathi)", placeholder="Write Marathi question (optional)...")
+    use_marathi_question = st.toggle("Use Marathi question", value=False)
+    if use_marathi_question:
+        st.info("Marathi answering coming soon. We will still generate an English answer.")
+
     run_btn = st.button("Get advice", type="primary")
     if not run_btn:
         return
-    if not user_question.strip():
-        st.error("Please enter a question first.")
+
+    selected_question = marathi_question.strip() if use_marathi_question else english_question.strip()
+    if not selected_question:
+        st.error("Please enter a question in the selected input.")
         return
 
     with st.spinner("Loading model..."):
@@ -276,22 +211,29 @@ def run_streamlit_ui() -> None:
             return
 
     context = build_context_json(crop=crop, stage=stage, location=location, symptoms=symptoms)
+
     rag_chunks: List[Dict] = []
     if rag_toggle:
+        if not rag_assets_ready():
+            st.warning("RAG is ON but index files are missing (`rag/rag_index.faiss`, `rag/rag_chunks.jsonl`).")
+            return
         with st.spinner("Retrieving trusted sources..."):
+            # Retrieve from required Spaces paths.
             rag_chunks = retrieve_top_k(
-                query=user_question,
+                query=selected_question,
                 top_k=top_k,
-                index_path="rag_index.faiss",
-                meta_path="rag_index_meta.json",
+                index_path=str(RAG_INDEX_PATH),
+                meta_path=str(RAG_CHUNKS_PATH),
             )
 
-    prompt = build_prompt(user_question=user_question, context=context, rag_chunks=rag_chunks)
+    prompt = build_prompt(user_question=selected_question, context=context, rag_chunks=rag_chunks)
     with st.spinner("Generating advice..."):
         answer = generate_answer(gen, prompt)
 
     st.markdown("### Advice")
     st.text(answer)
+    render_copy_answer_button(answer)
+
     st.markdown("### Sources used")
     if rag_chunks:
         for i, ch in enumerate(rag_chunks, start=1):
@@ -304,7 +246,10 @@ def run_streamlit_ui() -> None:
         "mode": "streamlit",
         "model_name": model_name.strip(),
         "adapter_path": adapter_path.strip(),
-        "question": user_question.strip(),
+        "question": selected_question,
+        "english_question": english_question.strip(),
+        "marathi_question": marathi_question.strip(),
+        "used_marathi_question": bool(use_marathi_question),
         "context": context,
         "rag_enabled": bool(rag_toggle),
         "top_k": int(top_k),
@@ -317,15 +262,4 @@ def run_streamlit_ui() -> None:
 
 
 if __name__ == "__main__":
-    args = parse_args()
-
-    # CLI fallback conditions:
-    # 1) user explicitly asked for CLI via --cli
-    # 2) Streamlit package is not available
-    if args.cli or not STREAMLIT_AVAILABLE:
-        run_cli(args)
-    else:
-        # If launched with plain python, auto-start Streamlit.
-        _auto_launch_streamlit_if_needed()
-        run_streamlit_ui()
-
+    main()

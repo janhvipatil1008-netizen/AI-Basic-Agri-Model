@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+**/__pycache__/
+
+# Virtual environment
+.venv/
+
+# Model/checkpoint artifacts
+*.pt
+*.bin
+train_outputs/
+
+# JSONL logs/data handling
+data/product_logs.jsonl
+data/*.jsonl
+!data/train_data.jsonl
+!data/eval_data.jsonl
+!data/teacher_answers.jsonl
+
+# Keep RAG index files tracked
+!rag/rag_index.faiss
+!rag/rag_chunks.jsonl
