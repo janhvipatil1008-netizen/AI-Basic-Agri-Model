@@ -1,0 +1,7 @@
+torch
+transformers
+sentencepiece
+peft
+datasets
+faiss-cpu
+sentence-transformers
