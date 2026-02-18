@@ -81,16 +81,22 @@ def build_context_json(crop: str, stage: str, location: str, symptoms: str) -> D
 def build_prompt(user_question: str, context: Dict, rag_chunks: List[Dict]) -> str:
     ctx_json = json.dumps(context, ensure_ascii=False)
     if rag_chunks:
+        selected_sources = rag_chunks[:2]
         source_blocks = []
-        for i, ch in enumerate(rag_chunks, start=1):
-            source_blocks.append(f"[Source {i}] {ch.get('title', 'untitled')}\n{ch.get('text', '')}")
+        source_titles = [ch.get("title", "untitled") for ch in selected_sources]
+        for i, ch in enumerate(selected_sources, start=1):
+            chunk_text = str(ch.get("text", ""))[:1200]
+            source_blocks.append(f"[Source {i}] {ch.get('title', 'untitled')}\n{chunk_text}")
         rag_text = "\n\n".join(source_blocks)
+        sources_line = "Sources used: " + ", ".join(source_titles)
     else:
         rag_text = "No retrieved context."
+        sources_line = "Sources used: none"
 
     return (
         f"{SYSTEM_PROMPT}\n\n"
         f"CONTEXT:\n{ctx_json}\n\n"
+        f"{sources_line}\n\n"
         "RETRIEVED SOURCES (use as evidence when available):\n"
         f"{rag_text}\n\n"
         f"USER QUESTION:\n{user_question.strip()}\n\n"
@@ -98,10 +104,40 @@ def build_prompt(user_question: str, context: Dict, rag_chunks: List[Dict]) -> s
     )
 
 
-def generate_answer(gen, prompt: str) -> str:
+def prepare_prompt_for_generation(gen, prompt: str, max_new_tokens: int = 220) -> tuple[str, int, int]:
+    """
+    Tokenize prompt and left-truncate if it exceeds model-safe context length.
+    Returns (safe_prompt, original_prompt_tokens, max_input_tokens).
+    """
+    tokenizer = gen.tokenizer
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    cfg = getattr(gen.model, "config", None)
+    n_positions = getattr(cfg, "n_positions", None) or getattr(cfg, "max_position_embeddings", None) or 1024
+    max_input_tokens = min(int(n_positions) - max_new_tokens - 5, 900)
+    max_input_tokens = max(64, max_input_tokens)
+
+    encoded = tokenizer(prompt, add_special_tokens=False, return_tensors="pt")
+    input_ids = encoded["input_ids"][0]
+    prompt_tokens = int(input_ids.shape[0])
+
+    if prompt_tokens > max_input_tokens:
+        input_ids = input_ids[-max_input_tokens:]
+        prompt = tokenizer.decode(
+            input_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+
+    return prompt, prompt_tokens, max_input_tokens
+
+
+def generate_answer(gen, prompt: str) -> tuple[str, int, int]:
+    safe_prompt, prompt_tokens, max_allowed = prepare_prompt_for_generation(gen, prompt, max_new_tokens=220)
     eos_id = gen.tokenizer.eos_token_id
     out = gen(
-        prompt,
+        safe_prompt,
         max_new_tokens=220,
         do_sample=True,
         temperature=0.3,
@@ -110,9 +146,9 @@ def generate_answer(gen, prompt: str) -> str:
         eos_token_id=eos_id,
         pad_token_id=eos_id,
     )[0]["generated_text"]
-    if out.startswith(prompt):
-        return out[len(prompt) :].strip()
-    return out.strip()
+    if out.startswith(safe_prompt):
+        return out[len(safe_prompt) :].strip(), prompt_tokens, max_allowed
+    return out.strip(), prompt_tokens, max_allowed
 
 
 def append_log(record: Dict) -> None:
@@ -228,9 +264,10 @@ def main() -> None:
 
     prompt = build_prompt(user_question=selected_question, context=context, rag_chunks=rag_chunks)
     with st.spinner("Generating advice..."):
-        answer = generate_answer(gen, prompt)
+        answer, prompt_tokens, max_allowed = generate_answer(gen, prompt)
 
     st.markdown("### Advice")
+    st.caption(f"Prompt tokens: {prompt_tokens} | Max allowed: {max_allowed}")
     st.text(answer)
     render_copy_answer_button(answer)
 
